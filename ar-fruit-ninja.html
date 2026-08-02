@@ -1,0 +1,1005 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+<title>SLICE — AR fruit cutting</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Big+Shoulders+Display:wght@400;600;800&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink:#06080a;
+    --bone:#f3efe6;
+    --dim:rgba(243,239,230,.52);
+    --faint:rgba(243,239,230,.16);
+    --hot:#ff3b30;
+    --display:'Big Shoulders Display','Oswald','Arial Narrow',system-ui,sans-serif;
+    --mono:'Space Mono','JetBrains Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%;overflow:hidden;background:var(--ink);color:var(--bone)}
+  body{font-family:var(--mono);-webkit-font-smoothing:antialiased;touch-action:none;user-select:none;-webkit-user-select:none}
+  #cam{position:fixed;inset:0;width:1px;height:1px;opacity:0;pointer-events:none}
+  #stage{position:fixed;inset:0;display:block}
+
+  /* ---------- HUD ---------- */
+  .hud{position:fixed;inset:0;pointer-events:none;padding:max(18px,env(safe-area-inset-top)) max(18px,env(safe-area-inset-right)) max(18px,env(safe-area-inset-bottom)) max(18px,env(safe-area-inset-left));
+       display:grid;grid-template-columns:1fr auto;grid-template-rows:auto 1fr auto;opacity:0;transition:opacity .5s ease}
+  .hud.on{opacity:1}
+  .eyebrow{font-size:9px;letter-spacing:.26em;text-transform:uppercase;color:var(--dim)}
+  .score{font-family:var(--display);font-weight:800;font-size:clamp(46px,9vw,84px);line-height:.82;letter-spacing:-.01em;
+         text-shadow:0 2px 26px rgba(0,0,0,.75)}
+  .lives{grid-column:2;justify-self:end;text-align:right}
+  .pips{display:flex;gap:5px;justify-content:flex-end;margin-top:7px}
+  .pip{width:16px;height:5px;background:var(--bone);box-shadow:0 0 12px rgba(255,255,255,.35)}
+  .pip.gone{background:transparent;box-shadow:none;outline:1px solid var(--faint);outline-offset:-1px}
+  .tel{grid-row:3;align-self:end;font-size:10px;line-height:1.8;color:var(--dim);letter-spacing:.06em}
+  .tel b{color:var(--bone);font-weight:400}
+  .combo{grid-row:3;grid-column:2;align-self:end;justify-self:end;text-align:right;font-family:var(--display);
+         font-weight:800;font-size:34px;line-height:1;opacity:0;transform:translateY(6px);transition:opacity .18s,transform .18s}
+  .combo.on{opacity:1;transform:none}
+  .combo small{display:block;font-family:var(--mono);font-size:9px;font-weight:400;letter-spacing:.26em;color:var(--dim)}
+
+  /* ---------- panels ---------- */
+  .panel{position:fixed;inset:0;display:grid;place-items:center;padding:24px;background:
+         radial-gradient(120% 90% at 50% 0%,rgba(6,8,10,.72),rgba(6,8,10,.94));backdrop-filter:blur(3px)}
+  .panel[hidden]{display:none}
+  .card{width:min(560px,100%);border:1px solid var(--faint);padding:30px 28px 26px;position:relative;background:rgba(6,8,10,.5)}
+  .card::before,.card::after{content:"";position:absolute;width:12px;height:12px;border:1px solid var(--bone);opacity:.7}
+  .card::before{top:-1px;left:-1px;border-right:0;border-bottom:0}
+  .card::after{bottom:-1px;right:-1px;border-left:0;border-top:0}
+  h1{font-family:var(--display);font-weight:800;font-size:clamp(58px,15vw,120px);line-height:.78;letter-spacing:-.02em;margin:10px 0 14px}
+  h1 span{display:block;font-size:.3em;letter-spacing:.04em;color:var(--dim);font-weight:600}
+  .lede{font-size:12.5px;line-height:1.75;color:var(--dim);max-width:44ch}
+  .lede b{color:var(--bone);font-weight:400}
+  .rule{height:1px;background:var(--faint);margin:20px 0}
+  .steps{display:grid;gap:8px;font-size:11.5px;color:var(--dim);line-height:1.6}
+  .steps i{font-style:normal;color:var(--bone);display:inline-block;width:16px}
+  button{pointer-events:auto;font-family:var(--display);font-weight:800;font-size:26px;letter-spacing:.02em;
+    background:var(--bone);color:var(--ink);border:0;padding:13px 30px 11px;cursor:pointer;transition:transform .12s,box-shadow .12s}
+  button:hover{transform:translateY(-2px);box-shadow:0 10px 30px rgba(243,239,230,.18)}
+  button:focus-visible{outline:2px solid var(--hot);outline-offset:3px}
+  button.ghost{background:transparent;color:var(--bone);box-shadow:inset 0 0 0 1px var(--faint);font-size:18px;padding:11px 20px 9px}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:22px}
+  .note{font-size:10.5px;color:var(--dim);letter-spacing:.04em;margin-top:14px;line-height:1.7}
+  .err{color:var(--hot);border-left:2px solid var(--hot);padding-left:10px;margin-top:16px;font-size:11.5px;line-height:1.7;display:none}
+  .err.on{display:block}
+  .final{display:flex;gap:34px;align-items:flex-end;margin:6px 0 4px}
+  .final div{line-height:1}
+  .final .n{font-family:var(--display);font-weight:800;font-size:64px;line-height:.8}
+  @media (prefers-reduced-motion:reduce){*{transition:none!important;animation:none!important}}
+</style>
+</head>
+<body>
+<video id="cam" playsinline muted autoplay></video>
+<canvas id="stage"></canvas>
+
+<div class="hud" id="hud">
+  <div>
+    <div class="eyebrow">Score</div>
+    <div class="score" id="score">0</div>
+  </div>
+  <div class="lives">
+    <div class="eyebrow">Misses left</div>
+    <div class="pips" id="pips"></div>
+  </div>
+  <div class="tel">
+    <div>TRACK <b id="tMode">—</b></div>
+    <div>HANDS <b id="tHands">0</b> · GESTURE <b id="tGesture">—</b></div>
+    <div>BLADE <b id="tVel">0</b> px/s · FPS <b id="tFps">0</b></div>
+  </div>
+  <div class="combo" id="combo">×2<small>Combo</small></div>
+</div>
+
+<div class="panel" id="start">
+  <div class="card">
+    <div class="eyebrow">Webcam · hand tracked · no controller</div>
+    <h1>SLICE<span>fruit ninja, in your room</span></h1>
+    <p class="lede">Fruit flies up through your camera feed. Swipe your hand through it to cut. <b>Miss three</b> and you're out. <b>Hit a bomb</b> and it costs you one.</p>
+    <div class="rule"></div>
+    <div class="steps">
+      <div><i>01</i> Stand back about an arm and a half, with light on your face.</div>
+      <div><i>02</i> Point with one finger, or hold up two like scissors — either locks the blade on.</div>
+      <div><i>03</i> Swipe fast through the fruit. A resting open hand won't cut anything.</div>
+    </div>
+    <div class="row">
+      <button id="go">Start camera</button>
+      <button class="ghost" id="mouse">Play with mouse</button>
+    </div>
+    <div class="note">Runs entirely on your machine — nothing is uploaded. Needs <b>https</b> or <b>localhost</b> for camera access.</div>
+    <div class="err" id="err"></div>
+  </div>
+</div>
+
+<div class="panel" id="over" hidden>
+  <div class="card">
+    <div class="eyebrow" id="overWhy">Out of misses</div>
+    <h1 style="font-size:clamp(44px,11vw,86px)">GAME<br>OVER</h1>
+    <div class="final">
+      <div><div class="eyebrow">Score</div><div class="n" id="fScore">0</div></div>
+      <div><div class="eyebrow">Best</div><div class="n" id="fBest" style="font-size:38px">0</div></div>
+      <div><div class="eyebrow">Cut</div><div class="n" id="fCut" style="font-size:38px">0</div></div>
+    </div>
+    <div class="row"><button id="again">Play again</button></div>
+  </div>
+</div>
+
+<script>
+/* =========================================================================
+   SLICE — AR fruit ninja
+   Single file. Camera + hand tracking (MediaPipe) with motion fallback.
+   ========================================================================= */
+
+const $ = s => document.querySelector(s);
+const rnd = (a,b) => a + Math.random()*(b-a);
+const clamp = (v,a,b) => v<a?a:v>b?b:v;
+const REDUCED = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+const video = $('#cam');
+const cv = $('#stage'), ctx = cv.getContext('2d');
+const splat = document.createElement('canvas'), sctx = splat.getContext('2d');
+
+let W=0, H=0, DPR=1;
+const SPLAT_SCALE = 0.5;   // juice-decal buffer renders at half res — much cheaper to fade/blit every frame
+let vignetteGrad = null, hurtGrad = null;
+function resize(){
+  DPR = Math.min(window.devicePixelRatio||1, 1.5);   // 2x DPR quadruples pixel work for barely visible gain
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = Math.round(W*DPR); cv.height = Math.round(H*DPR);
+  cv.style.width = W+'px'; cv.style.height = H+'px';
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  splat.width = Math.round(W*DPR*SPLAT_SCALE); splat.height = Math.round(H*DPR*SPLAT_SCALE);
+  sctx.setTransform(DPR*SPLAT_SCALE,0,0,DPR*SPLAT_SCALE,0,0);
+  mapVideo();
+  // gradients only depend on W/H, not per-frame state — build once, reuse every frame
+  vignetteGrad = ctx.createRadialGradient(W/2,H/2,Math.min(W,H)*0.28, W/2,H/2,Math.max(W,H)*0.72);
+  vignetteGrad.addColorStop(0,'rgba(0,0,0,0)'); vignetteGrad.addColorStop(1,'rgba(0,0,0,.62)');
+  hurtGrad = ctx.createRadialGradient(W/2,H/2,Math.min(W,H)*0.2, W/2,H/2,Math.max(W,H)*0.7);
+  hurtGrad.addColorStop(0,'rgba(255,59,48,0)'); hurtGrad.addColorStop(1,'rgba(255,59,48,.55)');
+}
+addEventListener('resize', resize);
+
+/* ---------- video → screen mapping (object-fit: cover, mirrored) ---------- */
+const vmap = {dx:0,dy:0,dw:0,dh:0};
+function mapVideo(){
+  const vw = video.videoWidth||640, vh = video.videoHeight||480;
+  const s = Math.max(W/vw, H/vh);
+  vmap.dw = vw*s; vmap.dh = vh*s;
+  vmap.dx = (W-vmap.dw)/2; vmap.dy = (H-vmap.dh)/2;
+}
+// normalized (unmirrored) camera coords -> mirrored screen coords
+const toScreen = (nx,ny) => ({ x: vmap.dx + (1-nx)*vmap.dw, y: vmap.dy + ny*vmap.dh });
+
+/* ============================ AUDIO ============================ */
+let AC=null, noise=null;
+function ac(){
+  if(!AC){
+    AC = new (window.AudioContext||window.webkitAudioContext)();
+    const n = AC.createBuffer(1, AC.sampleRate*1, AC.sampleRate);
+    const d = n.getChannelData(0);
+    for(let i=0;i<d.length;i++) d[i] = Math.random()*2-1;
+    noise = n;
+  }
+  if(AC.state === 'suspended') AC.resume();
+  return AC;
+}
+function sfxSlice(pitch){
+  if(!AC) return; const t = AC.currentTime;
+  const src = AC.createBufferSource(); src.buffer = noise;
+  const bp = AC.createBiquadFilter(); bp.type='bandpass'; bp.Q.value=1.6;
+  bp.frequency.setValueAtTime(3600*pitch, t);
+  bp.frequency.exponentialRampToValueAtTime(680, t+0.16);
+  const g = AC.createGain();
+  g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(0.16,t+0.008);
+  g.gain.exponentialRampToValueAtTime(0.0001, t+0.19);
+  src.connect(bp).connect(g).connect(AC.destination); src.start(t); src.stop(t+0.22);
+}
+function sfxBomb(){
+  if(!AC) return; const t = AC.currentTime;
+  const src = AC.createBufferSource(); src.buffer = noise;
+  const lp = AC.createBiquadFilter(); lp.type='lowpass';
+  lp.frequency.setValueAtTime(900,t); lp.frequency.exponentialRampToValueAtTime(70,t+0.5);
+  const g = AC.createGain(); g.gain.setValueAtTime(0.3,t); g.gain.exponentialRampToValueAtTime(0.0001,t+0.65);
+  src.connect(lp).connect(g).connect(AC.destination); src.start(t); src.stop(t+0.7);
+  const o = AC.createOscillator(); o.type='sine';
+  o.frequency.setValueAtTime(120,t); o.frequency.exponentialRampToValueAtTime(28,t+0.5);
+  const g2 = AC.createGain(); g2.gain.setValueAtTime(0.28,t); g2.gain.exponentialRampToValueAtTime(0.0001,t+0.55);
+  o.connect(g2).connect(AC.destination); o.start(t); o.stop(t+0.6);
+}
+function sfxMiss(){
+  if(!AC) return; const t=AC.currentTime;
+  const o=AC.createOscillator(); o.type='triangle';
+  o.frequency.setValueAtTime(300,t); o.frequency.exponentialRampToValueAtTime(90,t+0.22);
+  const g=AC.createGain(); g.gain.setValueAtTime(0.13,t); g.gain.exponentialRampToValueAtTime(0.0001,t+0.26);
+  o.connect(g).connect(AC.destination); o.start(t); o.stop(t+0.28);
+}
+function sfxCombo(n){
+  if(!AC) return; const t=AC.currentTime;
+  [0,4,7,11].slice(0,Math.min(4,n)).forEach((st,i)=>{
+    const o=AC.createOscillator(); o.type='sine';
+    o.frequency.value = 523.25*Math.pow(2,st/12);
+    const g=AC.createGain();
+    g.gain.setValueAtTime(0.0001,t+i*0.05);
+    g.gain.exponentialRampToValueAtTime(0.1,t+i*0.05+0.01);
+    g.gain.exponentialRampToValueAtTime(0.0001,t+i*0.05+0.3);
+    o.connect(g).connect(AC.destination); o.start(t+i*0.05); o.stop(t+i*0.05+0.32);
+  });
+}
+
+/* ============================ TRACKING ============================ */
+const tracker = {
+  mode:'none',       // 'hands' | 'motion' | 'pointer'
+  hands:0,
+  ready:false,
+  busy:false,
+  lastHand:0,         // last time ANY hand was seen in frame
+  lastGesture:0,       // last time a hand showed a valid cutting gesture
+  gestures:{}          // per-hand-index last classified gesture, for HUD
+};
+
+/* --- MediaPipe Hands (loaded from CDN; optional) --- */
+let mpHands = null;
+const mpIn = document.createElement('canvas');
+const mpCtx = mpIn.getContext('2d', {willReadFrequently:false});
+function loadScript(src){
+  return new Promise((res,rej)=>{
+    const s=document.createElement('script'); s.src=src; s.crossOrigin='anonymous';
+    s.onload=res; s.onerror=()=>rej(new Error('load '+src)); document.head.appendChild(s);
+  });
+}
+async function initHands(){
+  try{
+    await Promise.race([
+      loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/hands.js'),
+      new Promise((_,r)=>setTimeout(()=>r(new Error('timeout')),7000))
+    ]);
+    if(!window.Hands) throw new Error('no Hands');
+    mpHands = new window.Hands({locateFile:f=>'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/'+f});
+    mpHands.setOptions({maxNumHands:2, modelComplexity:0, minDetectionConfidence:0.6, minTrackingConfidence:0.5});
+    mpHands.onResults(onHands);
+    tracker.mode='hands';
+    return true;
+  }catch(e){
+    tracker.mode='motion';
+    return false;
+  }
+}
+
+/* --- gesture classification -----------------------------------------
+   Distance-from-wrist ratio, not y-position — stays correct no matter
+   how the hand is rotated (sideways swipes, upside-down, etc).
+   'point'    = index finger extended alone         -> single blade tip
+   'scissors' = index + middle extended (peace sign) -> two-point blade
+   anything else (fist / open palm / three+ fingers) does not cut,
+   so an idle open hand resting in frame won't trigger slices.        */
+function dist(a,b){ return Math.hypot(a.x-b.x, a.y-b.y); }
+function fingerUp(lm, mcpI, tipI, wrist){
+  return dist(wrist, lm[tipI]) > dist(wrist, lm[mcpI]) * 1.2;
+}
+function classifyGesture(lm){
+  const wrist = lm[0];
+  const index  = fingerUp(lm,5,8,wrist);
+  const middle = fingerUp(lm,9,12,wrist);
+  const ring   = fingerUp(lm,13,16,wrist);
+  const pinky  = fingerUp(lm,17,20,wrist);
+  if(index && middle && !ring && !pinky) return 'scissors';
+  if(index && !middle && !ring && !pinky) return 'point';
+  return 'idle';
+}
+
+function onHands(r){
+  tracker.busy = false;
+  const list = r.multiHandLandmarks || [];
+  tracker.hands = list.length;
+  const now = performance.now();
+  if(list.length) tracker.lastHand = now;
+  const seenKeys = new Set();
+  list.forEach((lm,i)=>{
+    const gest = classifyGesture(lm);
+    tracker.gestures[i] = gest;
+    const key = 'h'+i;
+    if(gest === 'scissors'){
+      // blade midpoint between index + middle fingertip, tips shown as the two blade edges
+      const tI = toScreen(lm[8].x, lm[8].y), tM = toScreen(lm[12].x, lm[12].y);
+      const mx = (tI.x+tM.x)/2, my = (tI.y+tM.y)/2;
+      feedBlade(key, mx, my, now, 'scissors', tI, tM);
+      tracker.lastGesture = now; seenKeys.add(key);
+    } else if(gest === 'point'){
+      const tip = lm[8], knuckle = lm[5];
+      const p = toScreen(tip.x, tip.y);
+      const k = toScreen(knuckle.x, knuckle.y);
+      // slight extension past the fingertip so the blade leads the hand
+      const ex = p.x + (p.x-k.x)*0.22, ey = p.y + (p.y-k.y)*0.22;
+      feedBlade(key, ex, ey, now, 'point');
+      tracker.lastGesture = now; seenKeys.add(key);
+    }
+    // idle gesture: hand is visible (counts toward tracker.hands / lastHand)
+    // but feeds no blade, so a resting open hand can't cut fruit.
+  });
+  // let blades belonging to hands that dropped their gesture age out & prune normally
+}
+
+/* --- Motion-difference tracker (fallback, zero dependencies) --- */
+const mw=112, mh=84;
+const mcv=document.createElement('canvas'); mcv.width=mw; mcv.height=mh;
+const mctx=mcv.getContext('2d',{willReadFrequently:true});
+let prevGray=null;
+function motionTrack(now){
+  mctx.drawImage(video,0,0,mw,mh);
+  const d = mctx.getImageData(0,0,mw,mh).data;
+  const gray = new Uint8ClampedArray(mw*mh);
+  for(let i=0,p=0;i<gray.length;i++,p+=4) gray[i] = (d[p]*0.3 + d[p+1]*0.59 + d[p+2]*0.11)|0;
+  if(!prevGray){ prevGray=gray; return; }
+  let sx=0, sy=0, n=0;
+  for(let y=0;y<mh;y++){
+    for(let x=0;x<mw;x++){
+      const i=y*mw+x;
+      if(Math.abs(gray[i]-prevGray[i])>26){ sx+=x; sy+=y; n++; }
+    }
+  }
+  prevGray = gray;
+  if(n>18 && n < mw*mh*0.42){
+    const p = toScreen(sx/n/mw, sy/n/mh);
+    tracker.hands = 1; tracker.lastHand = now;
+    const b = blades.get('m0');
+    // smooth so the centroid doesn't jitter
+    const x = b ? b.x + (p.x-b.x)*0.55 : p.x;
+    const y = b ? b.y + (p.y-b.y)*0.55 : p.y;
+    feedBlade('m0', x, y, now);
+  } else {
+    tracker.hands = 0;
+  }
+}
+
+/* ============================ BLADES ============================ */
+const blades = new Map();
+const TRAIL_MS = 210;
+function feedBlade(key,x,y,t,kind,p1,p2){
+  let b = blades.get(key);
+  if(!b){ b = {x, y, px:x, py:y, vel:0, lastT:t, pts:[]}; blades.set(key,b); }
+  b.px = b.x; b.py = b.y; b.x = x; b.y = y;
+  const dt = Math.max(8, t - b.lastT); b.lastT = t;
+  b.vel = b.vel*0.5 + (Math.hypot(x-b.px, y-b.py)/(dt/1000))*0.5;
+  b.pts.push({x,y,t});
+  b.seen = t;
+  b.kind = kind || 'point';
+  b.p1 = p1 || null; b.p2 = p2 || null;
+}
+function pruneBlades(now){
+  for(const [k,b] of blades){
+    while(b.pts.length && now - b.pts[0].t > TRAIL_MS) b.pts.shift();
+    if(now - (b.seen||0) > 600 && !b.pts.length) blades.delete(k);
+  }
+}
+
+/* ============================ FRUIT ============================ */
+const SPEC = {
+  melon:  {skin:'#1f7a35', skin2:'#0c3d1a', rind:'#d8ecc8', flesh:'#ef3b52', flesh2:'#ff7182', juice:'#ff2f4a', stripes:true, seeds:9, pts:1},
+  orange: {skin:'#ff9312', skin2:'#c25a00', rind:'#ffd9a3', flesh:'#ffa62b', flesh2:'#ffd08a', juice:'#ff9b1a', pores:true, wedges:8, pts:1},
+  lime:   {skin:'#8bc832', skin2:'#3f6d10', rind:'#e6f3c4', flesh:'#c9e86a', flesh2:'#eaf7b8', juice:'#b9e04f', pores:true, wedges:7, pts:1},
+  apple:  {skin:'#e0243b', skin2:'#7d0a1c', rind:'#ffe9c9', flesh:'#f6e6bd', flesh2:'#fff6de', juice:'#ffd6d6', leaf:true, seeds:3, pts:1},
+  dragon: {skin:'#e8306f', skin2:'#8a0f3d', rind:'#ffd0e2', flesh:'#f6f1ea', flesh2:'#ffffff', juice:'#ffd9e6', scales:true, seeds:16, pts:2}
+};
+const TYPES = Object.keys(SPEC);
+
+const fruits = [], halves = [], bits = [], texts = [];
+let shake = 0, flash = 0, hurt = 0;
+let frameParity = false;
+
+// One pre-blurred shadow blob, reused (scaled) under every fruit/half —
+// avoids ctx.shadowBlur, which forces a real per-shape blur pass on the
+// CPU/GPU every single frame for every object.
+const shadowSprite = (function(){
+  const d = 200, c = document.createElement('canvas'); c.width=d; c.height=d;
+  const g = c.getContext('2d');
+  const grd = g.createRadialGradient(d/2,d/2,0, d/2,d/2,d/2);
+  grd.addColorStop(0,'rgba(0,0,0,.5)'); grd.addColorStop(1,'rgba(0,0,0,0)');
+  g.fillStyle=grd; g.fillRect(0,0,d,d);
+  return c;
+})();
+function drawShadow(g, r){
+  const d = r*2.7;
+  g.drawImage(shadowSprite, -d/2, -d/2 + r*0.32, d, d);
+}
+
+function makeFruit(bomb){
+  const r = bomb ? rnd(30,36) : rnd(34,50);
+  const type = TYPES[(Math.random()*TYPES.length)|0];
+  const rise = rnd(0.52, 0.86) * H;
+  const g = grav();
+  const f = {
+    bomb: !!bomb, type, r,
+    x: rnd(0.14, 0.86)*W,
+    y: H + r + 10,
+    vy: -Math.sqrt(2*g*rise),
+    vx: 0,
+    rot: rnd(0,Math.PI*2), vrot: rnd(-2.2,2.2),
+    fuse: rnd(0,6.28),
+    seeds: []
+  };
+  f.vx = (f.x < W*0.5 ? 1 : -1) * rnd(0.02,0.14) * W;
+  const nSeeds = SPEC[type].seeds || 0;
+  for(let i=0;i<nSeeds;i++) f.seeds.push({u:rnd(-0.78,0.78), v:rnd(-0.55,0.55), a:rnd(0,3.14)});
+  return f;
+}
+const grav = () => H * 1.15;
+
+/* ---------- rendering helpers ----------
+   Skin/flesh/bomb-body textures are identical for every instance of a
+   type (seeds are the only per-fruit randomness, and those are cheap
+   dots drawn live). So each is rendered ONCE to an offscreen canvas and
+   reused via drawImage — avoids rebuilding radial/linear gradients and
+   stripe/pore/scale pattern loops on every object, every frame.        */
+const REF_R = 64, SPR_PAD = 1.5;
+const SPRITES = {};
+function sphere(g, r, c1, c2){
+  const grd = g.createRadialGradient(-r*0.34,-r*0.4,r*0.08, 0,0,r*1.06);
+  grd.addColorStop(0, c1); grd.addColorStop(0.62, c1); grd.addColorStop(1, c2);
+  g.beginPath(); g.arc(0,0,r,0,6.2832); g.fillStyle=grd; g.fill();
+}
+function gloss(g,r){
+  g.beginPath(); g.ellipse(-r*0.36,-r*0.44,r*0.3,r*0.19,-0.5,0,6.2832);
+  g.fillStyle='rgba(255,255,255,.3)'; g.fill();
+}
+function skinDetail(g, s, r){
+  if(s.stripes){
+    g.save();
+    g.beginPath(); g.arc(0,0,r,0,6.2832); g.clip();
+    g.globalAlpha=.5; g.strokeStyle='#0b3a17'; g.lineWidth=r*0.15; g.lineCap='round';
+    for(let i=-2;i<=2;i++){
+      const x = i*r*0.42;
+      g.beginPath();
+      g.moveTo(x*0.72, -r*1.05);
+      g.quadraticCurveTo(x*1.5, 0, x*0.72, r*1.05);
+      g.stroke();
+    }
+    g.restore();
+  }
+  if(s.pores){
+    g.save(); g.globalAlpha=.22; g.fillStyle='#5a2d00';
+    for(let i=0;i<26;i++){
+      const a=(i*2.399), rr=r*Math.sqrt((i+0.5)/26)*0.92;
+      g.beginPath(); g.arc(Math.cos(a)*rr, Math.sin(a)*rr, r*0.035, 0, 6.2832); g.fill();
+    }
+    g.restore();
+  }
+  if(s.scales){
+    g.save(); g.fillStyle='#7fd05a'; g.globalAlpha=.9;
+    for(let i=0;i<7;i++){
+      const a = i*0.897;
+      g.save(); g.rotate(a); g.translate(0,-r*0.72);
+      g.beginPath(); g.moveTo(0,-r*0.34); g.quadraticCurveTo(r*0.2,0, 0, r*0.3);
+      g.quadraticCurveTo(-r*0.2,0, 0,-r*0.34); g.fill(); g.restore();
+    }
+    g.restore();
+  }
+  if(s.leaf){
+    g.save(); g.strokeStyle='#5a3413'; g.lineWidth=r*0.09; g.lineCap='round';
+    g.beginPath(); g.moveTo(0,-r*0.9); g.quadraticCurveTo(r*0.06,-r*1.18, r*0.02,-r*1.28); g.stroke();
+    g.fillStyle='#3f9b34'; g.beginPath();
+    g.ellipse(r*0.3,-r*1.12, r*0.3, r*0.14, -0.5, 0, 6.2832); g.fill();
+    g.restore();
+  }
+}
+function makeSpriteCanvas(){
+  const dim = Math.ceil(REF_R*2*SPR_PAD);
+  const c = document.createElement('canvas'); c.width = dim; c.height = dim;
+  const g = c.getContext('2d'); g.translate(dim/2, dim/2);
+  return {c, g, dim};
+}
+function getSprite(type){
+  let spr = SPRITES[type];
+  if(spr) return spr;
+  const s = SPEC[type];
+  // whole fruit skin
+  const w = makeSpriteCanvas();
+  sphere(w.g, REF_R, s.skin, s.skin2);
+  skinDetail(w.g, s, REF_R);
+  gloss(w.g, REF_R);
+  // cut-face flesh (gradient + wedges only — seeds/rind stay per-instance, cheap)
+  const fl = makeSpriteCanvas();
+  const ry = REF_R*0.27;
+  const grd = fl.g.createLinearGradient(0,-ry,0,ry);
+  grd.addColorStop(0, s.flesh2); grd.addColorStop(1, s.flesh);
+  fl.g.beginPath(); fl.g.ellipse(0,0,REF_R,ry,0,0,6.2832); fl.g.fillStyle=grd; fl.g.fill();
+  if(s.wedges){
+    fl.g.save(); fl.g.globalAlpha=.5; fl.g.strokeStyle=s.flesh2; fl.g.lineWidth=REF_R*0.035;
+    for(let i=0;i<s.wedges;i++){
+      const a = (i/s.wedges)*Math.PI*2;
+      fl.g.beginPath(); fl.g.moveTo(0,0);
+      fl.g.lineTo(Math.cos(a)*REF_R*0.9, Math.sin(a)*ry*0.9); fl.g.stroke();
+    }
+    fl.g.restore();
+  }
+  spr = SPRITES[type] = {whole:w.c, flesh:fl.c, dim:w.dim};
+  return spr;
+}
+let bombSprite = null;
+function getBombSprite(){
+  if(bombSprite) return bombSprite;
+  const b = makeSpriteCanvas();
+  sphere(b.g, REF_R, '#3a3f47', '#0a0c10');
+  gloss(b.g, REF_R);
+  b.g.save(); b.g.globalAlpha=.85; b.g.strokeStyle='#ff3b30'; b.g.lineWidth=REF_R*0.09;
+  b.g.beginPath(); b.g.arc(0,0,REF_R*0.62, -0.6, 2.2); b.g.stroke(); b.g.restore();
+  bombSprite = b.c;
+  return bombSprite;
+}
+function drawSprite(g, spr, r){
+  const scale = r/REF_R, d = spr.width || spr.dim;
+  g.drawImage(spr, -d/2*scale, -d/2*scale, d*scale, d*scale);
+}
+function drawWhole(g, f){
+  drawSprite(g, getSprite(f.type).whole, f.r);
+}
+function drawFace(g, f){
+  const s = SPEC[f.type], r=f.r, ry=r*0.27;
+  drawSprite(g, getSprite(f.type).flesh, r);
+  if(f.seeds.length){
+    g.save(); g.fillStyle = f.type==='apple' ? '#6b4a1f' : (f.type==='dragon' ? '#1b1b1b' : '#2c1810');
+    f.seeds.forEach(sd=>{
+      g.save(); g.translate(sd.u*r*0.82, sd.v*ry*0.9); g.rotate(sd.a);
+      g.beginPath(); g.ellipse(0,0, r*(f.type==='dragon'?0.035:0.075), r*(f.type==='dragon'?0.03:0.045),0,0,6.2832);
+      g.fill(); g.restore();
+    });
+    g.restore();
+  }
+  g.lineWidth = r*0.11; g.strokeStyle = s.rind;
+  g.beginPath(); g.ellipse(0,0,r-r*0.05,ry-r*0.03,0,0,6.2832); g.stroke();
+}
+function drawBomb(g,f){
+  const r=f.r;
+  drawSprite(g, getBombSprite(), r);
+  // fuse: the only part of a bomb that's actually animated, so it stays live
+  g.save();
+  g.strokeStyle='#7a5a34'; g.lineWidth=r*0.13; g.lineCap='round';
+  g.beginPath(); g.moveTo(r*0.16,-r*0.92);
+  g.quadraticCurveTo(r*0.75,-r*1.22, r*0.62,-r*1.5); g.stroke();
+  const fl = 0.7 + Math.sin(f.fuse*14)*0.3;
+  g.fillStyle='#ffd166';
+  g.shadowColor='#ff8a00'; g.shadowBlur=14*fl;
+  g.beginPath(); g.arc(r*0.62,-r*1.5, r*0.2*fl, 0, 6.2832); g.fill();
+  g.restore();
+}
+
+/* ---------- slicing ---------- */
+function segDist(px,py, ax,ay, bx,by){
+  const dx=bx-ax, dy=by-ay, l2=dx*dx+dy*dy;
+  if(l2===0) return Math.hypot(px-ax,py-ay);
+  let t = ((px-ax)*dx + (py-ay)*dy)/l2; t = clamp(t,0,1);
+  return Math.hypot(px-(ax+t*dx), py-(ay+t*dy));
+}
+let comboN=0, comboUntil=0, cut=0;
+function slice(f, ang, sp){
+  f.dead = true;
+  if(f.bomb){
+    sfxBomb();
+    shake = REDUCED?0:26; flash = 1; hurt = 1;
+    for(let i=0;i<46;i++){
+      const a=rnd(0,6.28), v=rnd(120,760);
+      bits.push({x:f.x,y:f.y,vx:Math.cos(a)*v,vy:Math.sin(a)*v,r:rnd(2,6),life:rnd(0.4,1),t:0,c:i%3?'#ff7a3d':'#ffd166'});
+    }
+    loseLife();
+    return;
+  }
+  cut++;
+  const s = SPEC[f.type];
+  const now = performance.now();
+  if(now < comboUntil) comboN++; else comboN = 1;
+  comboUntil = now + 620;
+  const mult = comboN>=3 ? 2 : 1;
+  const gain = s.pts * mult;
+  score += gain;
+  sfxSlice(clamp(sp/1400,0.6,1.6));
+  if(comboN===3) sfxCombo(3);
+  texts.push({x:f.x,y:f.y,t:0,txt:'+'+gain, big:mult>1});
+  if(comboN>=3) showCombo(comboN);
+
+  const nx = Math.cos(ang+Math.PI/2), ny = Math.sin(ang+Math.PI/2);
+  for(const side of [-1,1]){
+    halves.push({
+      type:f.type, r:f.r, x:f.x, y:f.y,
+      vx: f.vx + nx*side*rnd(90,190),
+      vy: f.vy*0.72 + ny*side*rnd(90,190) - 60,
+      rot: ang, vrot: side*rnd(1.2,3.4), side, seeds:f.seeds, a:1
+    });
+  }
+  for(let i=0;i<24;i++){
+    const a = ang + rnd(-0.8,0.8) + (i%2?Math.PI:0), v=rnd(90,520);
+    bits.push({x:f.x,y:f.y,vx:Math.cos(a)*v,vy:Math.sin(a)*v - 60,r:rnd(2,7),life:rnd(0.5,1.1),t:0,c:s.juice});
+  }
+  // juice decal on the world
+  sctx.save(); sctx.globalAlpha=0.5; sctx.fillStyle=s.juice;
+  for(let i=0;i<7;i++){
+    const a=rnd(0,6.28), d=rnd(0,f.r*1.5);
+    sctx.beginPath(); sctx.ellipse(f.x+Math.cos(a)*d, f.y+Math.sin(a)*d, rnd(3,13), rnd(3,10), a, 0, 6.2832); sctx.fill();
+  }
+  sctx.restore();
+}
+function showCombo(n){
+  const el=$('#combo'); el.firstChild.nodeValue = '×'+n;
+  el.classList.add('on'); clearTimeout(el._t);
+  el._t = setTimeout(()=>el.classList.remove('on'), 800);
+}
+
+/* ============================ GAME STATE ============================ */
+let state='idle', score=0, best=0, lives=3, elapsed=0, spawnT=0, spawnEvery=1.5, lastFrame=0, fps=0;
+function setLives(n){
+  lives = n;
+  const pips = $('#pips'); pips.innerHTML='';
+  for(let i=0;i<3;i++){
+    const d=document.createElement('div');
+    d.className = 'pip' + (i<lives?'':' gone'); pips.appendChild(d);
+  }
+}
+function loseLife(){
+  setLives(lives-1);
+  hurt = 1;
+  if(lives<=0) gameOver();
+}
+function gameOver(){
+  state='over';
+  best = Math.max(best, score);
+  $('#fScore').textContent = score;
+  $('#fBest').textContent = best;
+  $('#fCut').textContent = cut;
+  $('#over').hidden = false;
+}
+function reset(){
+  score=0; cut=0; elapsed=0; spawnT=0.6; comboN=0;
+  fruits.length=0; halves.length=0; bits.length=0; texts.length=0;
+  setLives(3);
+  sctx.clearRect(0,0,W,H);
+  $('#over').hidden = true;
+  state='playing';
+}
+
+/* ============================ MAIN LOOP ============================ */
+function frame(now){
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (now - lastFrame)/1000 || 0.016);
+  lastFrame = now;
+  fps = fps*0.9 + (1/dt)*0.1;
+
+  // ---- tracking ----
+  if(video.readyState >= 2){
+    // Hand inference is the heaviest single thing this page does. Two cuts:
+    // (1) feed it a downscaled frame — WASM cost scales with pixel count,
+    //     and 480px-wide input tracks just as reliably as full 720p+ video.
+    // (2) cap it to ~24fps — the blade trail already smooths between
+    //     samples, so tracking doesn't need to run at the render's 60fps.
+    if(tracker.mode==='hands' && mpHands && !tracker.busy && now - (tracker.lastSent||0) > 42){
+      tracker.busy = true; tracker.sentAt = now; tracker.lastSent = now;
+      const vw = video.videoWidth||640, vh = video.videoHeight||480;
+      const scale = Math.min(1, 480/vw);
+      mpIn.width = Math.round(vw*scale); mpIn.height = Math.round(vh*scale);
+      mpCtx.drawImage(video, 0, 0, mpIn.width, mpIn.height);
+      try{
+        Promise.resolve(mpHands.send({image: mpIn}))
+          .catch(()=>{ tracker.busy=false; tracker.mode='motion'; });
+      }catch(e){ tracker.busy=false; tracker.mode='motion'; }
+    } else if(tracker.mode==='hands' && tracker.busy && now - (tracker.sentAt||0) > 2000){
+      tracker.busy = false;                       // inference stalled — unstick it
+    } else if(tracker.mode==='motion'){
+      motionTrack(now);
+    }
+  }
+  pruneBlades(now);
+
+  // ---- collisions ----
+  if(state==='playing'){
+    for(const [,b] of blades){
+      if(b.vel < 240) continue;
+      for(const f of fruits){
+        if(f.dead) continue;
+        if(segDist(f.x,f.y, b.px,b.py, b.x,b.y) < f.r*0.92){
+          slice(f, Math.atan2(b.y-b.py, b.x-b.px), b.vel);
+        }
+      }
+    }
+  }
+
+  // ---- sim ----
+  const g = grav();
+  if(state==='playing'){
+    elapsed += dt;
+    spawnEvery = Math.max(0.62, 1.5 - elapsed*0.012);
+    spawnT -= dt;
+    if(spawnT <= 0){
+      spawnT = spawnEvery * rnd(0.85,1.15);
+      const n = 1 + (Math.random() < clamp(elapsed/70,0,0.55) ? 1 : 0) + (Math.random()<0.18?1:0);
+      const bombChance = clamp(0.05 + elapsed*0.0022, 0, 0.24);
+      for(let i=0;i<n;i++){
+        setTimeout(()=>{ if(state==='playing') fruits.push(makeFruit(Math.random()<bombChance)); }, i*rnd(60,220));
+      }
+    }
+  }
+  for(let i=fruits.length-1;i>=0;i--){
+    const f = fruits[i];
+    if(state==='playing'){
+      f.vy += g*dt; f.x += f.vx*dt; f.y += f.vy*dt; f.rot += f.vrot*dt; f.fuse += dt;
+    }
+    if(f.dead || f.y - f.r > H + 40){
+      if(!f.dead && !f.bomb && state==='playing'){ sfxMiss(); loseLife(); }
+      fruits.splice(i,1);
+    }
+  }
+  for(let i=halves.length-1;i>=0;i--){
+    const h=halves[i];
+    h.vy += g*dt; h.x += h.vx*dt; h.y += h.vy*dt; h.rot += h.vrot*dt;
+    if(h.y - h.r > H+60) halves.splice(i,1);
+  }
+  for(let i=bits.length-1;i>=0;i--){
+    const b=bits[i]; b.t += dt;
+    b.vy += g*0.6*dt; b.x += b.vx*dt; b.y += b.vy*dt;
+    if(b.t > b.life) bits.splice(i,1);
+  }
+  for(let i=texts.length-1;i>=0;i--){ texts[i].t += dt; if(texts[i].t>0.9) texts.splice(i,1); }
+  shake *= 0.88; flash *= 0.9; hurt *= 0.94;
+
+  draw(now);
+  hud(now);
+}
+
+function draw(now){
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+  ctx.clearRect(0,0,W,H);
+
+  const sh = shake>0.4 ? shake : 0;
+  if(sh) ctx.translate(rnd(-sh,sh), rnd(-sh,sh));
+
+  // world — plain draw, no per-pixel ctx.filter (that pass over every
+  // pixel every frame was the single biggest cost). A flat tint blended
+  // with 'multiply' gets a near-identical graded look for a fraction of it.
+  if(video.readyState>=2){
+    ctx.save();
+    ctx.translate(W,0); ctx.scale(-1,1);
+    ctx.drawImage(video, vmap.dx, vmap.dy, vmap.dw, vmap.dh);
+    ctx.restore();
+    ctx.save();
+    ctx.globalCompositeOperation = 'multiply';
+    ctx.fillStyle = 'rgba(150,150,150,0.85)';
+    ctx.fillRect(0,0,W,H);
+    ctx.restore();
+  } else {
+    ctx.fillStyle='#0a0d11'; ctx.fillRect(0,0,W,H);
+  }
+
+  // juice decals fade out — runs on a small offscreen buffer (SPLAT_SCALE)
+  // and only every other frame, at double the fade rate, to halve the cost
+  frameParity = !frameParity;
+  if(frameParity){
+    sctx.save(); sctx.globalCompositeOperation='destination-out';
+    sctx.fillStyle='rgba(0,0,0,0.056)'; sctx.fillRect(0,0,W,H); sctx.restore();
+  }
+  ctx.save(); ctx.globalAlpha=0.55; ctx.globalCompositeOperation='multiply';
+  ctx.drawImage(splat,0,0,W,H); ctx.restore();
+
+  // vignette — cached gradient, rebuilt only on resize
+  ctx.fillStyle=vignetteGrad; ctx.fillRect(0,0,W,H);
+
+  // halves
+  for(const h of halves){
+    ctx.save(); ctx.translate(h.x,h.y); ctx.rotate(h.rot);
+    drawShadow(ctx, h.r);
+    ctx.save();
+    ctx.beginPath();
+    if(h.side<0) ctx.rect(-h.r-6,-h.r-6, h.r*2+12, h.r+6);
+    else ctx.rect(-h.r-6, 0, h.r*2+12, h.r+6);
+    ctx.clip();
+    drawWhole(ctx, {type:h.type, r:h.r, rot:h.rot, seeds:h.seeds});
+    ctx.restore();
+    drawFace(ctx, {type:h.type, r:h.r, seeds:h.seeds});
+    ctx.restore();
+  }
+
+  // fruit
+  for(const f of fruits){
+    ctx.save(); ctx.translate(f.x,f.y); ctx.rotate(f.rot);
+    drawShadow(ctx, f.r);
+    if(f.bomb) drawBomb(ctx,f); else drawWhole(ctx,f);
+    ctx.restore();
+  }
+
+  // juice bits
+  for(const b of bits){
+    const a = 1 - b.t/b.life;
+    ctx.globalAlpha = a; ctx.fillStyle = b.c;
+    ctx.beginPath(); ctx.arc(b.x,b.y, b.r*a, 0, 6.2832); ctx.fill();
+  }
+  ctx.globalAlpha=1;
+
+  // blades
+  for(const [,b] of blades) drawTrail(b, now);
+
+  // reticle
+  for(const [,b] of blades){
+    if(now - (b.seen||0) > 120) continue;
+    drawReticle(b, now);
+  }
+
+  // score pops
+  ctx.textAlign='center';
+  for(const t of texts){
+    const a = 1 - t.t/0.9;
+    ctx.globalAlpha = a;
+    ctx.fillStyle = t.big ? '#ffd166' : '#f3efe6';
+    ctx.font = (t.big?'800 34px ':'800 26px ') + "'Big Shoulders Display',sans-serif";
+    ctx.fillText(t.txt, t.x, t.y - t.t*70);
+  }
+  ctx.globalAlpha=1;
+
+  // hit feedback
+  if(flash>0.01){ ctx.fillStyle='rgba(255,255,255,'+(flash*0.5)+')'; ctx.fillRect(0,0,W,H); }
+  if(hurt>0.01){
+    ctx.save(); ctx.globalAlpha = clamp(hurt,0,1);
+    ctx.fillStyle=hurtGrad; ctx.fillRect(0,0,W,H);
+    ctx.restore();
+  }
+
+  // gesture / framing nudges
+  if(state==='playing' && tracker.mode==='hands'){
+    ctx.textAlign='center'; ctx.font = "400 12px 'Space Mono',monospace";
+    if(now - tracker.lastHand > 2200){
+      ctx.globalAlpha = 0.75; ctx.fillStyle='#f3efe6';
+      ctx.fillText('NO HAND IN FRAME — STEP INTO VIEW', W/2, H*0.5);
+      ctx.globalAlpha=1;
+    } else if(now - tracker.lastGesture > 1400){
+      ctx.globalAlpha = 0.75; ctx.fillStyle='#f3efe6';
+      ctx.fillText('POINT WITH ONE FINGER, OR TWO FOR SCISSORS', W/2, H*0.5);
+      ctx.globalAlpha=1;
+    }
+  } else if(state==='playing' && tracker.mode==='motion' && now - tracker.lastHand > 2200){
+    ctx.globalAlpha = 0.75; ctx.fillStyle='#f3efe6'; ctx.textAlign='center';
+    ctx.font = "400 12px 'Space Mono',monospace";
+    ctx.fillText('NO MOTION DETECTED — STEP INTO VIEW', W/2, H*0.5);
+    ctx.globalAlpha=1;
+  }
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+}
+
+function drawTrail(b, now){
+  const pts = b.pts;
+  if(pts.length<2) return;
+  ctx.lineCap='round'; ctx.lineJoin='round';
+  // chromatic fringe + white-hot core
+  const layers = [
+    {c:'rgba(0,229,255,.55)', o: 4, w:1.35},
+    {c:'rgba(255,0,144,.5)',  o:-4, w:1.35},
+    {c:'rgba(243,239,230,.95)', o:0, w:1.0}
+  ];
+  for(const L of layers){
+    for(let i=1;i<pts.length;i++){
+      const p0=pts[i-1], p1=pts[i];
+      const age = (now - p1.t)/TRAIL_MS;
+      const a = clamp(1-age,0,1);
+      const w = (2 + 16*a) * L.w;
+      ctx.strokeStyle = L.c;
+      ctx.globalAlpha = a*a;
+      ctx.lineWidth = w;
+      ctx.beginPath();
+      ctx.moveTo(p0.x + L.o*a, p0.y);
+      ctx.lineTo(p1.x + L.o*a, p1.y);
+      ctx.stroke();
+    }
+  }
+  ctx.globalAlpha=1;
+}
+
+function drawReticle(b, now){
+  ctx.save(); ctx.globalAlpha = 0.9;
+  ctx.strokeStyle = b.vel>240 ? '#f3efe6' : 'rgba(243,239,230,.45)';
+
+  if(b.kind === 'scissors' && b.p1 && b.p2){
+    // two-point blade: a ring on each fingertip joined by a line, like open scissors
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(b.p1.x,b.p1.y); ctx.lineTo(b.p2.x,b.p2.y); ctx.stroke();
+    [b.p1,b.p2].forEach(p=>{
+      ctx.beginPath(); ctx.arc(p.x,p.y, 10, 0, 6.2832); ctx.stroke();
+    });
+    ctx.beginPath(); ctx.arc(b.x,b.y, 3, 0, 6.2832);
+    ctx.fillStyle = ctx.strokeStyle; ctx.fill();
+    ctx.restore(); ctx.globalAlpha=1;
+    return;
+  }
+
+  // single index-finger point
+  const r = 26 + Math.min(18, b.vel/90);
+  ctx.translate(b.x, b.y);
+  ctx.lineWidth = 1;
+  ctx.setLineDash([5,7]);
+  ctx.lineDashOffset = REDUCED ? 0 : -now/26;
+  ctx.beginPath(); ctx.arc(0,0,r,0,6.2832); ctx.stroke();
+  ctx.setLineDash([]);
+  const t=r*0.55, o=r*1.28;
+  for(let i=0;i<4;i++){
+    const a=i*Math.PI/2 + Math.PI/4;
+    const cx=Math.cos(a)*o, cy=Math.sin(a)*o;
+    ctx.beginPath(); ctx.moveTo(cx-Math.cos(a)*t*0.5, cy-Math.sin(a)*t*0.5);
+    ctx.lineTo(cx+Math.cos(a)*t*0.2, cy+Math.sin(a)*t*0.2); ctx.stroke();
+  }
+  ctx.globalAlpha=0.55;
+  ctx.beginPath(); ctx.moveTo(-6,0); ctx.lineTo(6,0); ctx.moveTo(0,-6); ctx.lineTo(0,6); ctx.stroke();
+  ctx.restore();
+  ctx.globalAlpha=1;
+}
+
+let hudT=0;
+function hud(now){
+  $('#score').textContent = score;
+  if(now - hudT < 120) return; hudT = now;
+  let v=0; for(const [,b] of blades) v = Math.max(v, b.vel);
+  $('#tMode').textContent = tracker.mode==='hands' ? 'HAND LANDMARKS' : tracker.mode==='motion' ? 'MOTION DIFF' : tracker.mode==='pointer' ? 'POINTER' : '—';
+  $('#tHands').textContent = tracker.mode==='pointer' ? '—' : tracker.hands;
+  if(tracker.mode==='hands'){
+    const gs = Object.values(tracker.gestures||{});
+    $('#tGesture').textContent = gs.length ? gs.map(g=>g.toUpperCase()).join(' / ') : '—';
+  } else {
+    $('#tGesture').textContent = '—';
+  }
+  $('#tVel').textContent = v.toFixed(0);
+  $('#tFps').textContent = fps.toFixed(0);
+}
+
+/* ============================ INPUT / BOOT ============================ */
+addEventListener('pointermove', e=>{
+  if(state!=='playing' && state!=='ready') return;
+  feedBlade('p', e.clientX, e.clientY, performance.now());
+}, {passive:true});
+
+async function startCamera(){
+  const btn = $('#go'); btn.textContent = 'Starting…'; btn.disabled = true;
+  $('#err').classList.remove('on');
+  try{
+    if(!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia)
+      throw new Error('insecure');
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video:{ facingMode:'user', width:{ideal:1280}, height:{ideal:720} }, audio:false
+    });
+    video.srcObject = stream;
+    await video.play();
+    mapVideo();
+    ac();
+    btn.textContent = 'Loading tracker…';
+    await initHands();
+    $('#start').hidden = true;
+    $('#hud').classList.add('on');
+    reset();
+  }catch(e){
+    btn.disabled = false; btn.textContent = 'Start camera';
+    const err = $('#err');
+    err.classList.add('on');
+    if(location.protocol === 'file:'){
+      err.innerHTML = "Camera blocked on <b>file://</b>. Browsers only allow the camera on a secure origin. Run <b>python3 -m http.server 8080</b> in this folder, then open <b>http://localhost:8080/ar-fruit-ninja.html</b> — or just play with the mouse.";
+    } else if(e && (e.name==='NotAllowedError' || e.name==='SecurityError')){
+      err.innerHTML = "Camera permission denied. Allow camera access for this site in your browser settings, then reload.";
+    } else if(e && e.name==='NotFoundError'){
+      err.innerHTML = "No camera found. Connect one and reload, or play with the mouse.";
+    } else {
+      err.innerHTML = "Camera failed to start ("+((e&&e.name)||'unknown')+"). Try another browser, or play with the mouse.";
+    }
+  }
+}
+
+$('#go').addEventListener('click', startCamera);
+$('#mouse').addEventListener('click', ()=>{
+  ac();
+  tracker.mode='pointer';
+  $('#start').hidden = true;
+  $('#hud').classList.add('on');
+  reset();
+});
+$('#again').addEventListener('click', ()=>{ ac(); reset(); });
+addEventListener('keydown', e=>{
+  if(e.key===' ' && state==='over'){ e.preventDefault(); reset(); }
+});
+video.addEventListener('loadedmetadata', mapVideo);
+document.addEventListener('visibilitychange', ()=>{ lastFrame = performance.now(); });
+
+setLives(3);
+resize();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
