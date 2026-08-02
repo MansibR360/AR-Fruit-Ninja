@@ -232,92 +232,136 @@ const tracker = {
   mode:'none',       // 'hands' | 'motion' | 'pointer'
   hands:0,
   ready:false,
-  busy:false,
-  lastHand:0,         // last time ANY hand was seen in frame
-  lastGesture:0,       // last time a hand showed a valid cutting gesture
-  gestures:{}          // per-hand-index last classified gesture, for HUD
+  lastHand:0,          // last time ANY hand was seen in frame
+  lastGesture:0,        // last time a hand showed a valid cutting gesture
+  gestures:{},           // per-hand-index stable gesture, for HUD
+  gestureState:{},       // per-hand hysteresis buffers
+  smooth:{}               // per-point position low-pass filters
 };
 
-/* --- MediaPipe Hands (loaded from CDN; optional) --- */
-let mpHands = null;
-const mpIn = document.createElement('canvas');
-const mpCtx = mpIn.getContext('2d', {willReadFrequently:false});
-function loadScript(src){
-  return new Promise((res,rej)=>{
-    const s=document.createElement('script'); s.src=src; s.crossOrigin='anonymous';
-    s.onload=res; s.onerror=()=>rej(new Error('load '+src)); document.head.appendChild(s);
-  });
-}
+/* --- MediaPipe Hands, via the current Tasks Vision API ---------------
+   The old @mediapipe/hands@0.4 solution is deprecated and noticeably
+   less accurate/stable than the actively-maintained HandLandmarker,
+   which also runs on the GPU delegate when available. Loaded as an ES
+   module straight from CDN, no build step needed.                     */
+let handLandmarker = null;
 async function initHands(){
   try{
-    await Promise.race([
-      loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/hands.js'),
-      new Promise((_,r)=>setTimeout(()=>r(new Error('timeout')),7000))
+    const vision = await Promise.race([
+      import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs'),
+      new Promise((_,r)=>setTimeout(()=>r(new Error('timeout')),8000))
     ]);
-    if(!window.Hands) throw new Error('no Hands');
-    mpHands = new window.Hands({locateFile:f=>'https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4/'+f});
-    mpHands.setOptions({maxNumHands:2, modelComplexity:0, minDetectionConfidence:0.6, minTrackingConfidence:0.5});
-    mpHands.onResults(onHands);
+    const fileset = await vision.FilesetResolver.forVisionTasks(
+      'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
+    );
+    handLandmarker = await vision.HandLandmarker.createFromOptions(fileset, {
+      baseOptions:{
+        modelAssetPath:'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+        delegate:'GPU'
+      },
+      runningMode:'VIDEO',
+      numHands:2,
+      minHandDetectionConfidence:0.55,
+      minHandPresenceConfidence:0.5,
+      minTrackingConfidence:0.5
+    });
     tracker.mode='hands';
     return true;
   }catch(e){
-    tracker.mode='motion';
-    return false;
+    try{
+      // GPU delegate can fail on some laptops/drivers — retry on CPU before giving up
+      const vision = await import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs');
+      const fileset = await vision.FilesetResolver.forVisionTasks(
+        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
+      );
+      handLandmarker = await vision.HandLandmarker.createFromOptions(fileset, {
+        baseOptions:{
+          modelAssetPath:'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+          delegate:'CPU'
+        },
+        runningMode:'VIDEO', numHands:2,
+        minHandDetectionConfidence:0.55, minHandPresenceConfidence:0.5, minTrackingConfidence:0.5
+      });
+      tracker.mode='hands';
+      return true;
+    }catch(e2){
+      tracker.mode='motion';
+      return false;
+    }
   }
 }
 
 /* --- gesture classification -----------------------------------------
-   Distance-from-wrist ratio, not y-position — stays correct no matter
-   how the hand is rotated (sideways swipes, upside-down, etc).
-   'point'    = index finger extended alone         -> single blade tip
-   'scissors' = index + middle extended (peace sign) -> two-point blade
-   anything else (fist / open palm / three+ fingers) does not cut,
-   so an idle open hand resting in frame won't trigger slices.        */
-function dist(a,b){ return Math.hypot(a.x-b.x, a.y-b.y); }
-function fingerUp(lm, mcpI, tipI, wrist){
-  return dist(wrist, lm[tipI]) > dist(wrist, lm[mcpI]) * 1.2;
+   Joint-angle curl, not distance-from-wrist: the angle between the
+   MCP→PIP and PIP→TIP segments stays near 0° for a straight finger and
+   opens up sharply as it curls, regardless of how the hand is rotated
+   in frame (sideways, upside-down, tilted toward the camera). Distance
+   ratios break down under rotation/foreshortening; this doesn't.
+   'point'    = index extended alone                 -> single blade tip
+   'scissors' = index + middle extended (peace sign)  -> two-point blade
+   Anything else (fist / open palm / three+ fingers) doesn't cut, so a
+   resting hand in frame can't trigger accidental slices.               */
+function fingerStraight(lm, mcpI, pipI, tipI){
+  const a=lm[mcpI], b=lm[pipI], c=lm[tipI];
+  const v1x=b.x-a.x, v1y=b.y-a.y, v2x=c.x-b.x, v2y=c.y-b.y;
+  const m1=Math.hypot(v1x,v1y), m2=Math.hypot(v2x,v2y);
+  if(m1<1e-5||m2<1e-5) return false;
+  const cos = (v1x*v2x+v1y*v2y)/(m1*m2);   // ~1 = aligned/straight, drops as the joint bends
+  return cos > 0.74;                        // ≈ under 42° of bend at the PIP joint
 }
-function classifyGesture(lm){
-  const wrist = lm[0];
-  const index  = fingerUp(lm,5,8,wrist);
-  const middle = fingerUp(lm,9,12,wrist);
-  const ring   = fingerUp(lm,13,16,wrist);
-  const pinky  = fingerUp(lm,17,20,wrist);
+function rawGesture(lm){
+  const index  = fingerStraight(lm,5,6,8);
+  const middle = fingerStraight(lm,9,10,12);
+  const ring   = fingerStraight(lm,13,14,16);
+  const pinky  = fingerStraight(lm,17,18,20);
   if(index && middle && !ring && !pinky) return 'scissors';
   if(index && !middle && !ring && !pinky) return 'point';
   return 'idle';
 }
+// require a gesture to repeat for 2 consecutive detections before it takes
+// effect — kills single-frame flicker at the point/scissors boundary
+// without adding noticeable input lag.
+function stableGesture(i, raw){
+  let st = tracker.gestureState[i];
+  if(!st){ st = {cur:raw, cand:raw, count:1}; tracker.gestureState[i]=st; return raw; }
+  if(raw === st.cand) st.count++; else { st.cand = raw; st.count = 1; }
+  if(st.count >= 2) st.cur = st.cand;
+  return st.cur;
+}
+// light exponential smoothing on fingertip positions — raw landmarks
+// jitter a few px frame to frame, which reads as a shaky reticle
+function smoothPt(key, x, y){
+  let s = tracker.smooth[key];
+  if(!s){ s = {x,y}; tracker.smooth[key]=s; return s; }
+  s.x += (x-s.x)*0.55; s.y += (y-s.y)*0.55;
+  return s;
+}
 
-function onHands(r){
-  tracker.busy = false;
-  const list = r.multiHandLandmarks || [];
-  tracker.hands = list.length;
-  const now = performance.now();
-  if(list.length) tracker.lastHand = now;
-  const seenKeys = new Set();
-  list.forEach((lm,i)=>{
-    const gest = classifyGesture(lm);
+function onHands(landmarksList, now){
+  tracker.hands = landmarksList.length;
+  if(landmarksList.length) tracker.lastHand = now;
+  landmarksList.forEach((lm,i)=>{
+    const gest = stableGesture(i, rawGesture(lm));
     tracker.gestures[i] = gest;
     const key = 'h'+i;
     if(gest === 'scissors'){
-      // blade midpoint between index + middle fingertip, tips shown as the two blade edges
-      const tI = toScreen(lm[8].x, lm[8].y), tM = toScreen(lm[12].x, lm[12].y);
+      const rI = toScreen(lm[8].x, lm[8].y), rM = toScreen(lm[12].x, lm[12].y);
+      const tI = smoothPt(key+'i', rI.x, rI.y), tM = smoothPt(key+'m', rM.x, rM.y);
       const mx = (tI.x+tM.x)/2, my = (tI.y+tM.y)/2;
-      feedBlade(key, mx, my, now, 'scissors', tI, tM);
-      tracker.lastGesture = now; seenKeys.add(key);
+      feedBlade(key, mx, my, now, 'scissors', {x:tI.x,y:tI.y}, {x:tM.x,y:tM.y});
+      tracker.lastGesture = now;
     } else if(gest === 'point'){
-      const tip = lm[8], knuckle = lm[5];
-      const p = toScreen(tip.x, tip.y);
-      const k = toScreen(knuckle.x, knuckle.y);
+      const rTip = toScreen(lm[8].x, lm[8].y), rKnu = toScreen(lm[5].x, lm[5].y);
+      const p = smoothPt(key+'i', rTip.x, rTip.y);
+      const k = smoothPt(key+'k', rKnu.x, rKnu.y);
       // slight extension past the fingertip so the blade leads the hand
       const ex = p.x + (p.x-k.x)*0.22, ey = p.y + (p.y-k.y)*0.22;
       feedBlade(key, ex, ey, now, 'point');
-      tracker.lastGesture = now; seenKeys.add(key);
+      tracker.lastGesture = now;
     }
-    // idle gesture: hand is visible (counts toward tracker.hands / lastHand)
+    // idle gesture: hand counts as present (tracker.hands / lastHand)
     // but feeds no blade, so a resting open hand can't cut fruit.
   });
-  // let blades belonging to hands that dropped their gesture age out & prune normally
 }
 
 /* --- Motion-difference tracker (fallback, zero dependencies) --- */
@@ -664,23 +708,13 @@ function frame(now){
 
   // ---- tracking ----
   if(video.readyState >= 2){
-    // Hand inference is the heaviest single thing this page does. Two cuts:
-    // (1) feed it a downscaled frame — WASM cost scales with pixel count,
-    //     and 480px-wide input tracks just as reliably as full 720p+ video.
-    // (2) cap it to ~24fps — the blade trail already smooths between
-    //     samples, so tracking doesn't need to run at the render's 60fps.
-    if(tracker.mode==='hands' && mpHands && !tracker.busy && now - (tracker.lastSent||0) > 42){
-      tracker.busy = true; tracker.sentAt = now; tracker.lastSent = now;
-      const vw = video.videoWidth||640, vh = video.videoHeight||480;
-      const scale = Math.min(1, 480/vw);
-      mpIn.width = Math.round(vw*scale); mpIn.height = Math.round(vh*scale);
-      mpCtx.drawImage(video, 0, 0, mpIn.width, mpIn.height);
+    if(tracker.mode==='hands' && handLandmarker){
       try{
-        Promise.resolve(mpHands.send({image: mpIn}))
-          .catch(()=>{ tracker.busy=false; tracker.mode='motion'; });
-      }catch(e){ tracker.busy=false; tracker.mode='motion'; }
-    } else if(tracker.mode==='hands' && tracker.busy && now - (tracker.sentAt||0) > 2000){
-      tracker.busy = false;                       // inference stalled — unstick it
+        const result = handLandmarker.detectForVideo(video, now);
+        onHands(result.landmarks || [], now);
+      }catch(e){
+        tracker.mode='motion';
+      }
     } else if(tracker.mode==='motion'){
       motionTrack(now);
     }
