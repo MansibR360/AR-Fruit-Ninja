@@ -100,7 +100,7 @@
     <div class="rule"></div>
     <div class="steps">
       <div><i>01</i> Stand back about an arm and a half, with light on your face.</div>
-      <div><i>02</i> Point with one finger, or hold up two like scissors — either locks the blade on.</div>
+      <div><i>02</i> One finger = one blade. Two fingers = two blades, cutting independently.</div>
       <div><i>03</i> Swipe fast through the fruit. A resting open hand won't cut anything.</div>
     </div>
     <div class="row">
@@ -171,6 +171,22 @@ function mapVideo(){
 // normalized (unmirrored) camera coords -> mirrored screen coords
 const toScreen = (nx,ny) => ({ x: vmap.dx + (1-nx)*vmap.dw, y: vmap.dy + ny*vmap.dh });
 
+/* Hand → blade mapping. Deliberately NOT the same as toScreen.
+   The video is drawn 'cover', so on a 16:9 screen with a 4:3 camera the
+   top/bottom of the camera frame is cropped away — a hand the camera can
+   clearly see maps to a point past the screen edge, and the blade
+   silently disappears. That's why gestures died near the borders.
+   Instead: map the camera's own frame onto the full viewport, with a
+   gain so the middle ~75% of your reach covers the whole screen (no
+   stretching to the far corners), then clamp just past the edge so a
+   blade at the boundary still registers hits on fruit at the edge. */
+const HAND_GAIN = 1.34;
+function toBlade(nx, ny){
+  const x = 0.5 + (0.5 - nx) * HAND_GAIN;   // mirrored + gain about centre
+  const y = 0.5 + (ny  - 0.5) * HAND_GAIN;
+  return { x: clamp(x, -0.03, 1.03) * W, y: clamp(y, -0.03, 1.03) * H };
+}
+
 /* ============================ AUDIO ============================ */
 let AC=null, noise=null;
 function ac(){
@@ -234,9 +250,10 @@ const tracker = {
   ready:false,
   lastHand:0,          // last time ANY hand was seen in frame
   lastGesture:0,        // last time a hand showed a valid cutting gesture
-  gestures:{},           // per-hand-index stable gesture, for HUD
-  gestureState:{},       // per-hand hysteresis buffers
-  smooth:{}               // per-point position low-pass filters
+  gestures:{},           // per-hand stable gesture, for HUD
+  gestureState:{},       // per-hand hysteresis / latch buffers
+  smooth:{},              // per-point position low-pass filters
+  speeds:{}                // per-hand fingertip speed, for the motion fallback
 };
 
 /* --- MediaPipe Hands, via the current Tasks Vision API ---------------
@@ -261,9 +278,12 @@ async function initHands(){
       },
       runningMode:'VIDEO',
       numHands:2,
-      minHandDetectionConfidence:0.55,
-      minHandPresenceConfidence:0.5,
-      minTrackingConfidence:0.5
+      minHandDetectionConfidence:0.5,
+      // presence/tracking kept deliberately low: a hand half-outside the
+      // frame scores poorly, and dropping it is exactly the edge failure
+      // we're fixing. Detection stays higher to avoid false positives.
+      minHandPresenceConfidence:0.3,
+      minTrackingConfidence:0.3
     });
     tracker.mode='hands';
     return true;
@@ -280,7 +300,7 @@ async function initHands(){
           delegate:'CPU'
         },
         runningMode:'VIDEO', numHands:2,
-        minHandDetectionConfidence:0.55, minHandPresenceConfidence:0.5, minTrackingConfidence:0.5
+        minHandDetectionConfidence:0.5, minHandPresenceConfidence:0.3, minTrackingConfidence:0.3
       });
       tracker.mode='hands';
       return true;
@@ -295,73 +315,149 @@ async function initHands(){
    Joint-angle curl, not distance-from-wrist: the angle between the
    MCP→PIP and PIP→TIP segments stays near 0° for a straight finger and
    opens up sharply as it curls, regardless of how the hand is rotated
-   in frame (sideways, upside-down, tilted toward the camera). Distance
-   ratios break down under rotation/foreshortening; this doesn't.
-   'point'    = index extended alone                 -> single blade tip
-   'scissors' = index + middle extended (peace sign)  -> two-point blade
-   Anything else (fist / open palm / three+ fingers) doesn't cut, so a
-   resting hand in frame can't trigger accidental slices.               */
+   in frame. Distance ratios break down under rotation/foreshortening.
+   'point'    = index extended alone       -> one blade at the fingertip
+   'scissors' = index + middle extended     -> TWO independent blades  */
 function fingerStraight(lm, mcpI, pipI, tipI){
   const a=lm[mcpI], b=lm[pipI], c=lm[tipI];
   const v1x=b.x-a.x, v1y=b.y-a.y, v2x=c.x-b.x, v2y=c.y-b.y;
   const m1=Math.hypot(v1x,v1y), m2=Math.hypot(v2x,v2y);
   if(m1<1e-5||m2<1e-5) return false;
-  const cos = (v1x*v2x+v1y*v2y)/(m1*m2);   // ~1 = aligned/straight, drops as the joint bends
-  return cos > 0.74;                        // ≈ under 42° of bend at the PIP joint
+  const cos = (v1x*v2x+v1y*v2y)/(m1*m2);   // ~1 = straight, drops as the joint bends
+  return cos > 0.70;                        // ≈ under 45° of bend at the PIP joint
 }
 function rawGesture(lm){
   const index  = fingerStraight(lm,5,6,8);
   const middle = fingerStraight(lm,9,10,12);
   const ring   = fingerStraight(lm,13,14,16);
   const pinky  = fingerStraight(lm,17,18,20);
-  if(index && middle && !ring && !pinky) return 'scissors';
-  if(index && !middle && !ring && !pinky) return 'point';
+  // scissors is permissive: index+middle out and at least one of the
+  // outer fingers folded. Demanding BOTH be folded made the peace sign
+  // fail constantly, since a relaxed pinky often reads as straight.
+  if(index && middle && (!ring || !pinky)) return 'scissors';
+  if(index && !middle) return 'point';
   return 'idle';
 }
-// require a gesture to repeat for 2 consecutive detections before it takes
-// effect — kills single-frame flicker at the point/scissors boundary
-// without adding noticeable input lag.
-function stableGesture(i, raw){
-  let st = tracker.gestureState[i];
-  if(!st){ st = {cur:raw, cand:raw, count:1}; tracker.gestureState[i]=st; return raw; }
-  if(raw === st.cand) st.count++; else { st.cand = raw; st.count = 1; }
-  if(st.count >= 2) st.cur = st.cand;
+
+/* Gesture resolution with three tolerances stacked on top of the raw
+   classification, because raw per-frame classification is exactly what
+   was failing during real play:
+     1. LATCHING  — hold the last good gesture through brief dropouts.
+        Motion blur wrecks landmark accuracy at precisely the moment you
+        swipe, so a strict per-frame read cuts out mid-slash.
+     2. EDGE GRACE — near the frame border part of the hand is outside
+        the camera entirely and finger curl is unreadable. Detected
+        landmarks near the edge get a much longer hold instead of
+        collapsing to 'idle'.
+     3. MOTION FALLBACK — a fast-moving hand falls back to plain index
+        fingertip tracking with no gesture requirement, so a committed
+        swipe always cuts even if the pose can't be read. */
+const GRACE_MS = 420, EDGE_GRACE_MS = 1100, FAST_PX = 620;
+function nearEdge(lm){
+  for(let i=0;i<lm.length;i++){
+    const p=lm[i];
+    if(p.x<0.05 || p.x>0.95 || p.y<0.05 || p.y>0.95) return true;
+  }
+  return false;
+}
+function resolveGesture(key, lm, now, speed){
+  const raw  = rawGesture(lm);
+  const edge = nearEdge(lm);
+  const grace = edge ? EDGE_GRACE_MS : GRACE_MS;
+  let st = tracker.gestureState[key];
+  if(!st){ st = {cur:'idle', cand:'idle', count:0, valid:'idle', lastValid:0}; tracker.gestureState[key]=st; }
+
+  if(raw !== 'idle'){
+    if(raw === st.cand) st.count++; else { st.cand = raw; st.count = 1; }
+    // 2 consecutive reads to switch gesture (kills point/scissors flicker),
+    // but if nothing is latched yet, accept immediately so there's no lag
+    // on the very first gesture.
+    if(st.count >= 2 || now - st.lastValid > grace){
+      st.cur = raw; st.valid = raw; st.lastValid = now;
+    } else {
+      st.cur = st.valid;
+    }
+  } else if(now - st.lastValid < grace){
+    st.cur = st.valid;                    // brief dropout — hold
+  } else if(speed > FAST_PX){
+    st.cur = 'point';                     // moving fast — just track the index finger
+  } else {
+    st.cur = 'idle'; st.cand = 'idle'; st.count = 0;
+  }
+  st.edge = edge;
   return st.cur;
 }
+
 // light exponential smoothing on fingertip positions — raw landmarks
 // jitter a few px frame to frame, which reads as a shaky reticle
 function smoothPt(key, x, y){
   let s = tracker.smooth[key];
   if(!s){ s = {x,y}; tracker.smooth[key]=s; return s; }
-  s.x += (x-s.x)*0.55; s.y += (y-s.y)*0.55;
+  s.x += (x-s.x)*0.6; s.y += (y-s.y)*0.6;
   return s;
 }
+// per-hand speed of the index fingertip, used for the motion fallback
+function handSpeed(key, x, y, now){
+  let h = tracker.speeds[key];
+  if(!h){ h = {x,y,t:now,v:0}; tracker.speeds[key]=h; return 0; }
+  const dt = Math.max(8, now-h.t);
+  const v = Math.hypot(x-h.x, y-h.y)/(dt/1000);
+  h.v = h.v*0.5 + v*0.5; h.x=x; h.y=y; h.t=now;
+  return h.v;
+}
 
-function onHands(landmarksList, now){
+function onHands(landmarksList, handedness, now){
   tracker.hands = landmarksList.length;
   if(landmarksList.length) tracker.lastHand = now;
+  const live = new Set();
+  const seenHands = new Set();
+
   landmarksList.forEach((lm,i)=>{
-    const gest = stableGesture(i, rawGesture(lm));
-    tracker.gestures[i] = gest;
-    const key = 'h'+i;
+    // Key blades by handedness, not array position. MediaPipe reorders
+    // the list between frames, which made two-hand play swap blades and
+    // teleport trails across the screen.
+    const hand = (handedness && handedness[i] && handedness[i][0] && handedness[i][0].categoryName) || ('h'+i);
+    const key = 'H'+hand;
+    seenHands.add(key);
+
+    const tipI = toBlade(lm[8].x, lm[8].y);
+    const speed = handSpeed(key, tipI.x, tipI.y, now);
+    const gest = resolveGesture(key, lm, now, speed);
+    tracker.gestures[key] = gest + (tracker.gestureState[key].edge ? '*' : '');
+
     if(gest === 'scissors'){
-      const rI = toScreen(lm[8].x, lm[8].y), rM = toScreen(lm[12].x, lm[12].y);
-      const tI = smoothPt(key+'i', rI.x, rI.y), tM = smoothPt(key+'m', rM.x, rM.y);
-      const mx = (tI.x+tM.x)/2, my = (tI.y+tM.y)/2;
-      feedBlade(key, mx, my, now, 'scissors', {x:tI.x,y:tI.y}, {x:tM.x,y:tM.y});
+      // TWO independent blades — index and middle each cut on their own,
+      // so a spread peace sign sweeps twice the area in one pass.
+      const rM = toBlade(lm[12].x, lm[12].y);
+      const a = smoothPt(key+'i', tipI.x, tipI.y);
+      const b = smoothPt(key+'m', rM.x, rM.y);
+      feedBlade(key+'a', a.x, a.y, now, 'scissors', null, {x:b.x,y:b.y});
+      feedBlade(key+'b', b.x, b.y, now, 'scissors', null, null);
+      live.add(key+'a'); live.add(key+'b');
       tracker.lastGesture = now;
     } else if(gest === 'point'){
-      const rTip = toScreen(lm[8].x, lm[8].y), rKnu = toScreen(lm[5].x, lm[5].y);
-      const p = smoothPt(key+'i', rTip.x, rTip.y);
+      const rKnu = toBlade(lm[5].x, lm[5].y);
+      const p = smoothPt(key+'i', tipI.x, tipI.y);
       const k = smoothPt(key+'k', rKnu.x, rKnu.y);
       // slight extension past the fingertip so the blade leads the hand
       const ex = p.x + (p.x-k.x)*0.22, ey = p.y + (p.y-k.y)*0.22;
-      feedBlade(key, ex, ey, now, 'point');
+      feedBlade(key+'a', ex, ey, now, 'point');
+      live.add(key+'a');
       tracker.lastGesture = now;
     }
-    // idle gesture: hand counts as present (tracker.hands / lastHand)
-    // but feeds no blade, so a resting open hand can't cut fruit.
+    // 'idle': hand counts as present but feeds no blade, so a resting
+    // open hand can't cut fruit.
   });
+
+  // hands that left the frame: drop their latch/speed/HUD state so a
+  // returning hand starts clean instead of resuming a stale gesture
+  for(const k in tracker.gestures){
+    if(!seenHands.has(k)){
+      delete tracker.gestures[k]; delete tracker.gestureState[k];
+      delete tracker.speeds[k];
+      delete tracker.smooth[k+'i']; delete tracker.smooth[k+'m']; delete tracker.smooth[k+'k'];
+    }
+  }
 }
 
 /* --- Motion-difference tracker (fallback, zero dependencies) --- */
@@ -711,7 +807,7 @@ function frame(now){
     if(tracker.mode==='hands' && handLandmarker){
       try{
         const result = handLandmarker.detectForVideo(video, now);
-        onHands(result.landmarks || [], now);
+        onHands(result.landmarks || [], result.handedness || [], now);
       }catch(e){
         tracker.mode='motion';
       }
@@ -925,14 +1021,17 @@ function drawReticle(b, now){
   ctx.save(); ctx.globalAlpha = 0.9;
   ctx.strokeStyle = b.vel>240 ? '#f3efe6' : 'rgba(243,239,230,.45)';
 
-  if(b.kind === 'scissors' && b.p1 && b.p2){
-    // two-point blade: a ring on each fingertip joined by a line, like open scissors
+  if(b.kind === 'scissors'){
+    // each finger is its own blade — ring on this one, plus a link line
+    // to its partner drawn once (only the primary blade carries p2)
     ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(b.p1.x,b.p1.y); ctx.lineTo(b.p2.x,b.p2.y); ctx.stroke();
-    [b.p1,b.p2].forEach(p=>{
-      ctx.beginPath(); ctx.arc(p.x,p.y, 10, 0, 6.2832); ctx.stroke();
-    });
-    ctx.beginPath(); ctx.arc(b.x,b.y, 3, 0, 6.2832);
+    if(b.p2){
+      ctx.save(); ctx.globalAlpha = 0.4;
+      ctx.beginPath(); ctx.moveTo(b.x,b.y); ctx.lineTo(b.p2.x,b.p2.y); ctx.stroke();
+      ctx.restore();
+    }
+    ctx.beginPath(); ctx.arc(b.x,b.y, 11, 0, 6.2832); ctx.stroke();
+    ctx.beginPath(); ctx.arc(b.x,b.y, 2.5, 0, 6.2832);
     ctx.fillStyle = ctx.strokeStyle; ctx.fill();
     ctx.restore(); ctx.globalAlpha=1;
     return;
@@ -967,8 +1066,8 @@ function hud(now){
   $('#tMode').textContent = tracker.mode==='hands' ? 'HAND LANDMARKS' : tracker.mode==='motion' ? 'MOTION DIFF' : tracker.mode==='pointer' ? 'POINTER' : '—';
   $('#tHands').textContent = tracker.mode==='pointer' ? '—' : tracker.hands;
   if(tracker.mode==='hands'){
-    const gs = Object.values(tracker.gestures||{});
-    $('#tGesture').textContent = gs.length ? gs.map(g=>g.toUpperCase()).join(' / ') : '—';
+    const gs = Object.values(tracker.gestures||{}).filter(g=>g && g.indexOf('idle')!==0);
+    $('#tGesture').textContent = gs.length ? gs.map(g=>g.toUpperCase()).join(' / ') : 'IDLE';
   } else {
     $('#tGesture').textContent = '—';
   }
